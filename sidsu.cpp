@@ -29,6 +29,12 @@
     const ssize_t SOCKET_ERROR = -1;
 #endif
 
+std::string trim(std::string s){
+    s.erase(0, s.find_first_not_of(" \t\r\n\x00"));
+    s.erase(s.find_last_not_of(" \t\r\n\x00") + 1);
+    return s;
+}
+
 uint32_t crc32(const std::byte message[], unsigned long long msglen){
     uint32_t crc = 0xFFFFFFFF;
 
@@ -141,7 +147,7 @@ int spawnProgram(std::string executable, std::vector<std::string> params, std::s
         taskinfo.cb = sizeof(taskinfo);
         ZeroMemory(&newprocinfo, sizeof(newprocinfo));
 
-        return CreateProcessW(NULL, winCommandLine, NULL, NULL, FALSE, 0, NULL, winWorkingDir, &taskinfo, &newprocinfo);
+        return CreateProcessW(NULL, winCommandLine, NULL, NULL, FALSE, CREATE_BREAKAWAY_FROM_JOB, NULL, winWorkingDir, &taskinfo, &newprocinfo);
     #elif __linux__
         pid_t forkres = fork();
         if (forkres == 0){
@@ -160,7 +166,7 @@ int spawnProgram(std::string executable, std::vector<std::string> params, std::s
             execv(executable.c_str(), myargsarray);
         }
         childPid = forkres;
-        return (forkres <= 0);
+        return (forkres > 0);
     #endif
 }
 
@@ -203,6 +209,8 @@ int main(int argc, char* clArguments[]){
         argv.push_back(std::string(clArguments[i]));
     }
 #endif
+    //std::ofstream logfile("/tmp/sidsu.log");
+    //std::cerr.rdbuf(logfile.rdbuf());
 
     std::filesystem::path paramspath = (std::filesystem::temp_directory_path() /= std::string("dsuparams.txt"));
     std::cerr << "Path to parameter file " << paramspath << std::endl;
@@ -210,7 +218,7 @@ int main(int argc, char* clArguments[]){
     std::ifstream settingsfile("dsusettings.txt");
     std::string cemuexec = "";
     std::string idtext = "";
-    int fakeappid = 480;
+    int fakeappid = 1536610;
     std::cerr << "Trying to load settings \n";
     if (settingsfile.good()){
         std::getline(settingsfile, cemuexec);
@@ -218,6 +226,10 @@ int main(int argc, char* clArguments[]){
         fakeappid = std::stoi(idtext);
     }
     settingsfile.close();
+
+    std::ofstream appidfile("steam_appid.txt");
+    appidfile << fakeappid << std::endl;
+    appidfile.close();
 
     std::ifstream paramfile(paramspath);
     std::vector<std::string> fileargs;
@@ -295,7 +307,6 @@ int main(int argc, char* clArguments[]){
         return 1;
     }
 
-
     if ( SteamAPI_RestartAppIfNecessary(fakeappid) ){
         return 1;
     }
@@ -336,13 +347,17 @@ int main(int argc, char* clArguments[]){
     }
     freeaddrinfo(servresult);
     
-    std::string cemucommand = cemuexec;
+    std::string cemucommand = trim(cemuexec);
     if (dsuCustomEmu){
-        cemucommand = emuCustomExe;
+        cemucommand = trim(emuCustomExe);
     }
     std::string cemudir = std::filesystem::path(cemucommand).remove_filename().u8string();
 
     std::cerr << "Starting target emulator\n";
+    std::cerr << "cemucommand = '" << cemucommand << "'" << std::endl;
+    std::cerr << "cemudir = '" << cemudir << "'" << std::endl;
+    std::cerr << "file exists = " << std::filesystem::exists(cemucommand) << std::endl;
+    std::cerr << "emuParams size = " << emuParams.size() << std::endl;
     if (spawnProgram(cemucommand, emuParams, cemudir) == 0){
         std::cerr << "Failed to launch client\n";
         return 1;
@@ -350,9 +365,9 @@ int main(int argc, char* clArguments[]){
     
     std::cerr << "Starting SteamInput\n";
 
-    std::filesystem::remove("steam_appid.txt");
+    //std::filesystem::remove("steam_appid.txt");
     SteamAPI_Init();
-    SteamInput()->Init();
+    SteamInput()->Init(true);
 
     std::vector<subscription> subs;
 
@@ -398,6 +413,7 @@ int main(int argc, char* clArguments[]){
         if ( (std::chrono::steady_clock::now() - lastcemucheck) > std::chrono::milliseconds(500) ){
             lastcemucheck = std::chrono::steady_clock::now();
             clientRunning = checkSpawnedAlive();
+            //std::cerr << "controllers_num=" << controllers_num << " steamProfileActive=" << steamProfileActive << std::endl;
         }
 
         if (!steamProfileActive && controllers_num > 0 && (std::chrono::steady_clock::now() - lastbindingcheck) > std::chrono::milliseconds(1000) ){
@@ -417,6 +433,7 @@ int main(int argc, char* clArguments[]){
             }
         }
 
+        //std::cerr << "SteamProfile Active: " << steamProfileActive << " Connected controllers: " << controllers_num << std::endl;
         if (steamProfileActive){
             SteamInput()->ActivateActionSet(STEAM_INPUT_HANDLE_ALL_CONTROLLERS, actset);
         }
@@ -432,6 +449,8 @@ int main(int argc, char* clArguments[]){
                 //std::cerr << "SOCKET ERROR " << sockError << std::endl;
                 break;
             }
+
+            std::cerr << "Received " << packetbytes << " bytes, type=" << *(uint32_t*)(UDPrecv+16) << std::endl;
 
             if (packetbytes < 20){
                 std::cerr << "PACKET TOO SHORT < 20B" << std::endl;
@@ -678,6 +697,9 @@ int main(int argc, char* clArguments[]){
                 if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - subs[i].lastrequest).count() < 5){
                     if (subs[i].slot == 5 || subs[i].slot == handle_idx){
                         sendto(DSUSocket, (char *)(response), 100, 0, (sockaddr *)(&subs[i].clientaddr), sizeof(subs[i].clientaddr));
+                        //if (digitals1 != 0 || digitals2 != 0) {
+                        //    std::cerr << "Sent packet to " << subs.size() << " subscribers, digitals1=" << (int)digitals1 << " LX=" << (int)*(uint8_t*)(response+40) << std::endl;
+                        //}
                     }
                 }
                 else{
