@@ -209,7 +209,7 @@ int main(int argc, char* clArguments[]){
         argv.push_back(std::string(clArguments[i]));
     }
 #endif
-    //std::ofstream logfile("/tmp/sidsu.log");
+    //std::ofstream logfile("sidsu.log");
     //std::cerr.rdbuf(logfile.rdbuf());
 
     std::filesystem::path paramspath = (std::filesystem::temp_directory_path() /= std::string("dsuparams.txt"));
@@ -218,7 +218,7 @@ int main(int argc, char* clArguments[]){
     std::ifstream settingsfile("dsusettings.txt");
     std::string cemuexec = "";
     std::string idtext = "";
-    int fakeappid = 1536610;
+    int fakeappid = 480;
     std::cerr << "Trying to load settings \n";
     if (settingsfile.good()){
         std::getline(settingsfile, cemuexec);
@@ -226,10 +226,9 @@ int main(int argc, char* clArguments[]){
         fakeappid = std::stoi(idtext);
     }
     settingsfile.close();
-
-    std::ofstream appidfile("steam_appid.txt");
-    appidfile << fakeappid << std::endl;
-    appidfile.close();
+	
+	std::cerr << "cemuexec: " << cemuexec << std::endl;
+	std::cerr << "fakeappid: " << fakeappid << std::endl;
 
     std::ifstream paramfile(paramspath);
     std::vector<std::string> fileargs;
@@ -354,10 +353,6 @@ int main(int argc, char* clArguments[]){
     std::string cemudir = std::filesystem::path(cemucommand).remove_filename().u8string();
 
     std::cerr << "Starting target emulator\n";
-    std::cerr << "cemucommand = '" << cemucommand << "'" << std::endl;
-    std::cerr << "cemudir = '" << cemudir << "'" << std::endl;
-    std::cerr << "file exists = " << std::filesystem::exists(cemucommand) << std::endl;
-    std::cerr << "emuParams size = " << emuParams.size() << std::endl;
     if (spawnProgram(cemucommand, emuParams, cemudir) == 0){
         std::cerr << "Failed to launch client\n";
         return 1;
@@ -365,9 +360,22 @@ int main(int argc, char* clArguments[]){
     
     std::cerr << "Starting SteamInput\n";
 
-    //std::filesystem::remove("steam_appid.txt");
+    std::filesystem::remove("steam_appid.txt");
     SteamAPI_Init();
+	
+	// Wait for emulator to fully start and Steam overlay to settle
+	std::cerr << "Waiting for emulator to settle..." << std::endl;
+	std::this_thread::sleep_for(std::chrono::milliseconds(500));
+	SteamAPI_RunCallbacks();
+	
     SteamInput()->Init(true);
+	std::cerr << "Steam Input initialised" << std::endl;
+	#if _WIN32
+	ShellExecuteW(NULL, L"open", (L"steam://forceinputappid/" + std::to_wstring(fakeappid)).c_str(), NULL, NULL, SW_HIDE);
+	#elif __linux__
+	std::string forceCmd = "xdg-open steam://forceinputappid/" + std::to_string(fakeappid);
+	system(forceCmd.c_str());
+	#endif
 
     std::vector<subscription> subs;
 
@@ -400,11 +408,15 @@ int main(int argc, char* clArguments[]){
         touchpad_x_adj[handle_idx] = 0;
         touchpad_y_adj[handle_idx] = 0;
     }
-
-    bool clientRunning = true;
+	
+	int lastMajor = -1;
+	int lastMinor = -1;
+	
+    bool clientRunning = true;	
     while(clientRunning){
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
         SteamInput()->RunFrame();
+
         uint64_t datacapture = std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
         reports++;
         controllers_num = SteamInput()->GetConnectedControllers(controllers);
@@ -416,12 +428,17 @@ int main(int argc, char* clArguments[]){
             //std::cerr << "controllers_num=" << controllers_num << " steamProfileActive=" << steamProfileActive << std::endl;
         }
 
-        if (!steamProfileActive && controllers_num > 0 && (std::chrono::steady_clock::now() - lastbindingcheck) > std::chrono::milliseconds(1000) ){
+        if (controllers_num > 0 && (std::chrono::steady_clock::now() - lastbindingcheck) > std::chrono::milliseconds(1000) ){
             lastbindingcheck = std::chrono::steady_clock::now();
-            int majorRevision = -1;
-            int minorRevision = -1;
-            bool configLoaded = SteamInput()->GetDeviceBindingRevision(controllers[0], &majorRevision, &minorRevision);
-            if (configLoaded){
+			int majorRevision = -1;
+			int minorRevision = -1;
+			bool configLoaded = SteamInput()->GetDeviceBindingRevision(controllers[0], &majorRevision, &minorRevision);
+			if (configLoaded && (majorRevision != lastMajor || minorRevision != lastMinor)){
+			    lastMajor = majorRevision;
+			    lastMinor = minorRevision;
+			    std::cerr << "Config changed! major=" << majorRevision << " minor=" << minorRevision << std::endl;
+
+
                 steamProfileActive = true;
                 for (int i = 0; i < digitalActions.size(); i++){
                     digitalhandles[digitalActions[i]] = SteamInput()->GetDigitalActionHandle(digitalActions[i].c_str());
@@ -433,7 +450,6 @@ int main(int argc, char* clArguments[]){
             }
         }
 
-        //std::cerr << "SteamProfile Active: " << steamProfileActive << " Connected controllers: " << controllers_num << std::endl;
         if (steamProfileActive){
             SteamInput()->ActivateActionSet(STEAM_INPUT_HANDLE_ALL_CONTROLLERS, actset);
         }
@@ -450,7 +466,7 @@ int main(int argc, char* clArguments[]){
                 break;
             }
 
-            std::cerr << "Received " << packetbytes << " bytes, type=" << *(uint32_t*)(UDPrecv+16) << std::endl;
+            //std::cerr << "Received " << packetbytes << " bytes, type=" << *(uint32_t*)(UDPrecv+16) << std::endl;
 
             if (packetbytes < 20){
                 std::cerr << "PACKET TOO SHORT < 20B" << std::endl;
@@ -697,12 +713,9 @@ int main(int argc, char* clArguments[]){
                 if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - subs[i].lastrequest).count() < 5){
                     if (subs[i].slot == 5 || subs[i].slot == handle_idx){
                         sendto(DSUSocket, (char *)(response), 100, 0, (sockaddr *)(&subs[i].clientaddr), sizeof(subs[i].clientaddr));
-                        //if (digitals1 != 0 || digitals2 != 0) {
-                        //    std::cerr << "Sent packet to " << subs.size() << " subscribers, digitals1=" << (int)digitals1 << " LX=" << (int)*(uint8_t*)(response+40) << std::endl;
-                        //}
                     }
                 }
-                else{
+                else {
                     subs.erase(subs.begin() + i);
                     i--;
                 }
@@ -721,8 +734,16 @@ int main(int argc, char* clArguments[]){
     SteamInput()->Shutdown();
     SteamAPI_Shutdown();
 
+    std::ofstream appidfile("steam_appid.txt");
+    appidfile << fakeappid << std::endl;
+    appidfile.close();
+
+	#if _WIN32
+	ShellExecuteW(NULL, L"open", L"steam://forceinputappid/0", NULL, NULL, SW_HIDE);
+	#elif __linux__
+	system("xdg-open steam://forceinputappid/0");
+	#endif
+
     std::cerr << "Exiting\n";
     
 }
-
-
